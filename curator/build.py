@@ -16,10 +16,8 @@ from __future__ import annotations
 
 import csv
 import datetime as _dt
-import hashlib
 import json
 import shutil
-import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +25,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .download import download, sha256_file
 from .errors import DataValidationError
 from .text import base_title, normalize
 
@@ -56,7 +55,15 @@ class BuildSettings:
 # Download
 # ---------------------------------------------------------------------------
 
-def ensure_raw_files(raw_dir: Path, url: str, zip_name: str, needed: list[str], log=print) -> None:
+def ensure_raw_files(
+    raw_dir: Path,
+    url: str,
+    zip_name: str,
+    needed: list[str],
+    tls_pin_sha256: str | None = None,
+    zip_sha256: str | None = None,
+    log=print,
+) -> None:
     """Download the zip (if needed) and extract just the files we use (if needed)."""
     raw_dir.mkdir(parents=True, exist_ok=True)
     missing = [n for n in needed if not (raw_dir / n).is_file()]
@@ -66,16 +73,15 @@ def ensure_raw_files(raw_dir: Path, url: str, zip_name: str, needed: list[str], 
 
     zip_path = raw_dir / zip_name
     if not zip_path.is_file():
-        part = zip_path.with_suffix(zip_path.suffix + ".part")
         log(f"Downloading {url} (about 1.4 GB, this can take a while)...")
-        try:
-            with urllib.request.urlopen(url) as resp, open(part, "wb") as out:
-                shutil.copyfileobj(resp, out, length=1024 * 1024)
-        except Exception as exc:  # network errors are fatal and explained
-            part.unlink(missing_ok=True)
-            raise DataValidationError(f"Download failed from {url}: {exc}") from exc
-        part.rename(zip_path)
-        log(f"Saved {zip_path}")
+        download(url, zip_path, tls_pin_sha256, zip_sha256, log)
+    elif zip_sha256:
+        actual = sha256_file(zip_path)
+        if actual != zip_sha256.lower():
+            raise DataValidationError(
+                f"{zip_path} doesn't match DATASET_ZIP_SHA256 in config.py (got {actual}). "
+                "Delete it and run the build again."
+            )
 
     if not zipfile.is_zipfile(zip_path):
         raise DataValidationError(f"{zip_path} is not a valid zip file. Delete it and run the build again.")
@@ -166,7 +172,10 @@ def _author_fields(value, where: str) -> tuple[str, str]:
     if value is None:
         names = []
     elif isinstance(value, str):
-        names = [value] if value.strip() else []
+        # Co-authors are stored as one comma-separated string, e.g.
+        # "Neil Gaiman, Michael Reaves". (Checked on the real data: no name
+        # contains a comma, such as "King, Jr.".)
+        names = [n for n in value.split(",") if n.strip()]
     elif isinstance(value, list):
         names = []
         for a in value:
@@ -179,19 +188,25 @@ def _author_fields(value, where: str) -> tuple[str, str]:
     else:
         raise DataValidationError(f"{where}: unexpected authors value {value!r}")
     names = [" ".join(n.split()) for n in names]
+    display = value.strip() if isinstance(value, str) else ", ".join(names)
     keys = []
     for n in names:
         k = normalize(n)
         if k and k not in keys:
             keys.append(k)
-    return ", ".join(names), AUTHOR_KEY_SEP.join(keys)
+    return display, AUTHOR_KEY_SEP.join(keys)
 
 
 def _year_field(value, where: str) -> str:
-    """Year as text ("" when missing). Non-year values are an error, not a guess."""
+    """Year as text ("" when missing). Non-year values are an error, not a guess.
+    The dataset uses 0 for an unknown year (1,256 books), so 0 counts as missing."""
     if value is None or (isinstance(value, str) and not value.strip()):
         return ""
     year = _as_int(value, f"{where} year")
+    if year == 0:
+        return ""
+    if year < 0:
+        raise DataValidationError(f"{where}: negative year {year}")
     return str(year)
 
 
@@ -305,14 +320,6 @@ def threshold_stats(matrix: np.ndarray, thresholds) -> dict:
     return out
 
 
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 # ---------------------------------------------------------------------------
 # Main build
 # ---------------------------------------------------------------------------
@@ -372,7 +379,7 @@ def build(s: BuildSettings, log=print) -> dict:
         "source": {
             "dataset": "Tag Genome Dataset for Books (Kotkov et al., 2022), GroupLens",
             "scores_file": s.scores_file,
-            "scores_sha256": _sha256(scores_path),
+            "scores_sha256": sha256_file(scores_path),
             "metadata_file": s.metadata_file,
             "tags_file": s.tags_file,
         },

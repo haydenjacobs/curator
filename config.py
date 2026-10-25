@@ -27,6 +27,19 @@ PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 # Where the build step downloads the dataset from (about 1.4 GB).
 DATASET_URL = "https://files.grouplens.org/datasets/book-genome/book-genome.zip"
 
+# Security lock #1 (first download). The site's certificate can't be verified
+# the standard way (its chain ends at a root with a malformed key), so we accept
+# only this exact certificate, identified by its SHA-256 fingerprint. It is only
+# used when the standard check fails. The site's current certificate expires
+# 13 Dec 2026; after that the build will stop and ask you to re-check the pin
+# (see README, "Downloading the data").
+DATASET_TLS_PIN_SHA256 = "66b1471bd5b84c08efb30f06b4bec8503f76d6a361ae276459d994b979a7762f"
+
+# Security lock #2 (every download after the first). SHA-256 fingerprint of the
+# zip we first downloaded. Any later download, on any computer, must match it
+# byte for byte or the build stops. Recorded from the first download, 25 Oct 2026.
+DATASET_ZIP_SHA256 = "cb8b23176783cc3cd1cb6754e6c92be36b52c5de12b90a2404a59e580c92afe7"
+
 # Name of the downloaded zip inside RAW_DIR.
 DATASET_ZIP_NAME = "book-genome.zip"
 
@@ -50,11 +63,11 @@ EXPECTED_SCORE_ROWS = EXPECTED_BOOKS * EXPECTED_TAGS  # 6,814,898
 
 # A book "has" a tag when its score for that tag is at least this value.
 # Used for: (1) tag rarity weights, (2) deciding which tags count as "shared"
-# when explaining a match. To be chosen from the real score distribution --
-# `python build.py` prints how many book-tag pairs clear 0.1 / 0.3 / 0.5 / 0.7
-# and how many tags a typical book has at each (also saved in
-# data/processed/manifest.json). See README section "The tag threshold".
-# PROVISIONAL: 0.5 is a placeholder until the real data has been examined.
+# when explaining a match. Chosen from the real score distribution
+# (`python build.py` prints it): at 0.5 a typical book has 54 tags (range
+# 34-85), which reads as a real description; 0.3 gives ~114 tags/book including
+# obvious noise, and 0.7 leaves 88 of 727 tags (e.g. "deserts", "magic realism")
+# unable to apply to any book. See README section "The tag threshold".
 TAG_THRESHOLD = 0.5
 
 # The thresholds the build step reports statistics for (for choosing the above).

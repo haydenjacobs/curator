@@ -148,3 +148,35 @@ def test_load_detects_tampered_matrix(tmp_path):
     np.save(tmp_path / "processed" / "scores.npy", m)
     with pytest.raises(DataValidationError, match="outside 0–1"):
         load_catalog(tmp_path / "processed")
+
+
+def test_zip_with_wrong_fingerprint_is_rejected(tmp_path):
+    import zipfile
+
+    from curator.build import ensure_raw_files
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    with zipfile.ZipFile(raw / "book-genome.zip", "w") as zf:
+        zf.writestr("book-genome/scores/glmer.csv", "tag,item_id,score\n")
+    with pytest.raises(DataValidationError, match="doesn't match DATASET_ZIP_SHA256"):
+        ensure_raw_files(raw, "https://example.invalid/x.zip", "book-genome.zip",
+                         ["scores/glmer.csv"], zip_sha256="0" * 64, **QUIET)
+    assert not (raw / "scores" / "glmer.csv").exists()  # nothing extracted
+
+
+def test_zip_extracts_only_needed_files(tmp_path):
+    import zipfile
+
+    from curator.build import ensure_raw_files
+    from curator.download import sha256_file
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    with zipfile.ZipFile(raw / "book-genome.zip", "w") as zf:
+        zf.writestr("book-genome/scores/glmer.csv", "tag,item_id,score\n")
+        zf.writestr("book-genome/scores/tagdl.csv", "ignored\n")
+    ensure_raw_files(raw, "https://example.invalid/x.zip", "book-genome.zip", ["scores/glmer.csv"],
+                     zip_sha256=sha256_file(raw / "book-genome.zip"), **QUIET)
+    assert (raw / "scores" / "glmer.csv").is_file()
+    assert not (raw / "scores" / "tagdl.csv").exists()

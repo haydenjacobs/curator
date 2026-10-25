@@ -30,11 +30,9 @@ def format_result(result: RecommendationResult, decimals: int) -> str:
         lines.append(f"{r.rank}. {b['title']} — {b['author'] or 'unknown author'} ({b['year'] or '?'})  [id:{b['id']}]")
         lines.append(f"   similarity: {r.similarity:.{decimals}f}")
         if r.shared_tags:
-            tags = ", ".join(f"{t.name} ({t.contribution / r.similarity:.0%})" for t in r.shared_tags)
-            lines.append(f"   why: {tags}")
+            lines.append(f"   why: {', '.join(t.name for t in r.shared_tags)}")
         else:
             lines.append("   why: no single tag strongly shared (overall tag profile is similar)")
-    lines.append("\n(% = share of the similarity score that tag accounts for)")
     return "\n".join(lines)
 
 

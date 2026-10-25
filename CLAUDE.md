@@ -34,8 +34,9 @@ focus is data architecture and algorithm correctness.
 1. Lookup by case-insensitive normalized title (full title, then title without
    trailing "(Series, #n)"), or `id:<n>`. 1 match → use; many → list with
    author/year/id and stop; none → say so (with "contains" suggestions) and stop.
-2. Rarity `w_t = log(N / n_t)`, `n_t` = books with score ≥ `TAG_THRESHOLD`;
-   `n_t = 0` → weight 0.
+2. Rarity `w_t = log(N / max(n_t, 1))`, `n_t` = books with score ≥
+   `TAG_THRESHOLD`; `n_t = 0` → max weight log(N) (real content tags such as
+   "cooking" never reach 0.5 but are genuinely rare — don't zero them).
 3. Profile = mean over inputs of (input weight × score). Likes = +1; the engine
    supports negative weights (dislikes) via `Recommender.recommend_rows`, not
    exposed in the CLI yet.

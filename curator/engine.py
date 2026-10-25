@@ -4,8 +4,9 @@ a command line or a web server can both call this the same way.
 
 Steps:
   1. Look up the input books (see lookup.py).
-  2. Tag rarity weight  w_t = log(N / n_t), where n_t = books whose score for
-     tag t is >= TAG_THRESHOLD. Tags that apply to no book get weight 0.
+  2. Tag rarity weight  w_t = log(N / max(n_t, 1)), where n_t = books whose
+     score for tag t is >= TAG_THRESHOLD. A tag that clears the threshold on no
+     book is treated as maximally rare (as if n_t = 1).
   3. Taste profile      profile_t = mean over inputs of (input weight x score).
                         Likes are +1; negative weights (dislikes) work too.
   4. Tag weight         weight_t = w_t x multiplier_t   (multipliers default 1.0)
@@ -102,14 +103,15 @@ def _validate(settings: EngineSettings, catalog: Catalog) -> None:
 
 
 def rarity_weights(scores: np.ndarray, threshold: float) -> np.ndarray:
-    """w_t = log(N / n_t). A tag that applies to no book (n_t = 0) gets 0:
-    it never 'really applies', so it can't be evidence of a match."""
+    """w_t = log(N / max(n_t, 1)).
+
+    n_t = 0 happens for real content tags the scoring model rates low across the
+    board (in the real data at 0.5: "cooking", "chess", "haunted house", whose
+    top books are exactly the right ones but score ~0.4-0.49). They are as rare
+    as a tag can be, so they get the maximum weight log(N), never infinity."""
     n_books = scores.shape[0]
     n_t = (scores >= threshold).sum(axis=0)
-    w = np.zeros(scores.shape[1], dtype=np.float64)
-    has = n_t > 0
-    w[has] = np.log(n_books / n_t[has])
-    return w
+    return np.log(n_books / np.maximum(n_t, 1)).astype(np.float64)
 
 
 class Recommender:

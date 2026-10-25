@@ -84,9 +84,10 @@ Because you liked:
 
 1. <title> — <author> (<year>)  [id:...]
    similarity: 0.812
-   why: desert (21%), politics (14%), ecology (9%), religion (7%), space opera (6%)
+   why: ecology, space, space opera, politics, epic
 ```
-The % after each tag is how much of the similarity score that tag accounts for.
+The "why" tags are listed strongest first: the shared tags that added the most
+to the match.
 
 ## 4. Run the tests
 
@@ -105,8 +106,10 @@ common ones, the one-per-author rule works, and lookup errors are clear.
 2. **Tag rarity** — `weight = log(N / n)`, where N is the number of books and n
    is how many books the tag "really applies" to (score ≥ the threshold). A tag
    on almost every book ("fiction") gets a weight near 0; a niche tag ("surf")
-   gets a high weight. A tag that applies to *no* book gets weight 0 (it's never
-   strong enough anywhere to count as evidence).
+   gets a high weight. A tag that clears the threshold on *no* book gets the
+   highest weight (as if it applied to one book). In this dataset that's 51
+   tags at 0.5, mostly real topics the scoring model rates low across the
+   board, like "cooking", "chess" and "haunted house".
 3. **Taste profile** — for each tag, the average across your books of
    (input weight × that book's score). Liked books have input weight +1. The
    engine already accepts −1 for disliked books; that just isn't exposed yet.
@@ -140,12 +143,64 @@ recomputed each run from the processed matrix.
 
 ## The tag threshold
 
-`python build.py` prints a table of how many book-tag pairs score ≥ 0.1, 0.3,
-0.5 and 0.7, and how many tags a typical book has at each level (also stored in
-`data/processed/manifest.json`). The threshold should be the level at which a
-typical book has a meaningful handful of tags — enough to describe it, few
-enough that each one means something. The final choice and reasoning will be
-recorded here once the real data has been examined.
+`python build.py` prints this table from the real data (also stored in
+`data/processed/manifest.json`):
+
+| Threshold | Book-tag pairs at or above | Tags per book (median) | Tags that apply to no book |
+|---|---|---|---|
+| 0.1 | 2,767,860 (41%) | 295 | 2 |
+| 0.3 | 1,071,619 (16%) | 114 | 17 |
+| **0.5** | **507,130 (7%)** | **54** | **51** |
+| 0.7 | 254,848 (4%) | 27 | 88 |
+
+**Chosen: 0.5.**
+- At 0.1 or 0.3, a "typical" book has 100–300 tags, so "applies" means
+  almost nothing.
+- At 0.7, 88 tags (12%), including real topics like "deserts", "magic realism"
+  and "boarding school", can never apply to any book, so they could never be
+  shown as a reason.
+- At 0.5, a typical book has 54 tags (34–85). Dune's tags at this level include
+  space, ecology and politics, but also some noise like "submarines" (0.53).
+- Recommendations were compared at 0.3, 0.5 and 0.7 for several well-known
+  books. 0.5 and 0.7 gave near-identical, sensible lists; 0.3 was noisier.
+
+## Downloading the data (the certificate pin)
+
+GroupLens's download server has a misconfigured security certificate. Its chain
+ends at a root certificate whose key is mathematically invalid, so no standard
+tool can verify it. The build therefore does this:
+
+1. It tries the normal certificate check first.
+2. If that fails, it accepts the connection only if the server's certificate
+   is exactly the one recorded in `config.py` (`DATASET_TLS_PIN_SHA256`).
+3. Once the file has downloaded, its fingerprint must match
+   `DATASET_ZIP_SHA256`, so every download, on any computer, gets byte-for-byte
+   the same file as the first one.
+
+The site's current certificate expires on **13 Dec 2026**. After that, a fresh
+download stops with a "doesn't match the pin" error. Then you, or Claude, check
+the new certificate and update `DATASET_TLS_PIN_SHA256`. The zip fingerprint
+check still guarantees the data itself hasn't changed. If `data/raw/` already
+holds the files, nothing is downloaded and the pin doesn't matter.
+
+## Things to know about the data
+
+- **Years are edition years**, not first publication: Dune shows 2006, Pride
+  and Prejudice 2000. 1,256 books (13%) have no year (stored as 0 in the data)
+  and show "?".
+- **Titles repeat**: 26 exact titles belong to two different books each
+  (e.g. two different "Dark Matter"s). Lookup lists them so you can pick by id.
+- **Series appear as separate books** ("Catching Fire (The Hunger Games, #2)").
+  The one-per-author rule stops a whole series filling your list, but one
+  sequel can still appear. Set `EXCLUDE_INPUT_AUTHORS = True` to block that.
+- **Opinion tags** like "good", "recommended", "loved it" and "5 stars" score
+  high on nearly every book. Rarity weighting gives them weight 0
+  automatically, so they never drive a match.
+- **Similarity scores cluster high** (usually 0.80–0.97). Every book has a
+  small score on all 727 tags, and those weak background scores make up about
+  80% of the similarity. What matters is the ranking, not the absolute number.
+- One tag, "contempor​ary", contains an invisible character and is a near
+  duplicate of "contemporary". It's kept as-is, since it's what the data says.
 
 ## Project layout
 

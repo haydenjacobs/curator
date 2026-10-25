@@ -20,6 +20,8 @@ def main() -> int:
             config.DATASET_URL,
             config.DATASET_ZIP_NAME,
             [config.SCORES_FILE, config.METADATA_FILE, config.TAGS_FILE],
+            tls_pin_sha256=config.DATASET_TLS_PIN_SHA256,
+            zip_sha256=config.DATASET_ZIP_SHA256,
         )
         manifest = build(
             BuildSettings(

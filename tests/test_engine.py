@@ -68,11 +68,12 @@ def test_broad_tags_weigh_less_than_niche_tags(catalog):
     assert w[col["fiction"]] < w[col["space"]] < w[col["surf"]]
 
 
-def test_tag_on_no_book_gets_zero_weight_not_infinity():
-    scores = np.array([[0.9, 0.1], [0.8, 0.2]])
+def test_tag_on_no_book_gets_max_weight_not_infinity():
+    scores = np.array([[0.9, 0.1], [0.8, 0.2], [0.1, 0.3]])
     w = rarity_weights(scores, 0.5)
     assert np.isfinite(w).all()
-    assert w[1] == 0.0
+    assert w[1] == pytest.approx(np.log(3))  # treated as if on exactly 1 book
+    assert w[1] >= w.max()
 
 
 # --- determinism ------------------------------------------------------------
@@ -168,3 +169,22 @@ def test_similarity_is_cosine(catalog, make_engine):
     w = rarity_weights(catalog.scores, THRESHOLD)
     a, b = catalog.scores[0] * w, catalog.scores[1] * w
     assert res.recommendations[0].similarity == pytest.approx(a @ b / np.linalg.norm(a) / np.linalg.norm(b))
+
+
+def test_author_cap_applies_to_co_authors(tmp_path):
+    from conftest import BOOKS, settings_for, write_raw
+    from curator.build import build
+    from curator.data import load_catalog
+    from curator.engine import EngineSettings, Recommender
+
+    # A Dune-like book co-written by Frank Herbert, stored the way the real
+    # data stores co-authors: one comma-separated string.
+    extra = (11, "Dune Prequel", "Brian Herbert, Frank Herbert", 2000, [0.9, 0.9, 0.95, 0.1, 0.0, 0.1])
+    write_raw(tmp_path / "raw", books=BOOKS + [extra])
+    s = settings_for(tmp_path, n_books=len(BOOKS) + 1)
+    build(s, log=lambda *_: None)
+    cat = load_catalog(s.processed_dir)
+    assert cat.author_keys(10) == {"brian herbert", "frank herbert"}
+    res = Recommender(cat, EngineSettings(tag_threshold=THRESHOLD, top_n=6)).recommend(["Dune"])
+    herbert = [r for r in res.recommendations if "Frank Herbert" in r.book["author"]]
+    assert len(herbert) == 1
