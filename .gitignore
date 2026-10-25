@@ -1,0 +1,7 @@
+# Dataset files are never committed (license + size). Rebuild with: python build.py
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
