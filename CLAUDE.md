@@ -39,11 +39,16 @@ focus is data architecture and algorithm correctness.
    "cooking" never reach 0.5 but are genuinely rare — don't zero them).
 3. Profile = mean over inputs of (input weight × score). Likes = +1; the engine
    supports negative weights (dislikes) via `Recommender.recommend_rows`, not
-   exposed in the CLI yet.
+   exposed in the CLI yet. `MULTI_BOOK_MODE = "per_book"` (default): one
+   profile per liked book (+ all dislikes). **Owner requirement: every liked
+   book entered must be represented in the results.** `"blend"` = one averaged
+   profile (original design; one book can crowd out the others).
 4. Per-tag multipliers from config (default 1.0).
 5. Cosine similarity of weighted profile vs weighted book vectors.
 6. Exclude input books; cap results per author (`MAX_PER_AUTHOR`, default 1).
-7. Top N (default 3) with top 5 shared tags by contribution.
+7. Profiles take turns picking (strongest remaining match first each round,
+   ties by lowest input id); N = max(TOP_N, liked books). Each result carries
+   `because_of` and its top 5 shared tags by contribution.
 
 ## Commands
 

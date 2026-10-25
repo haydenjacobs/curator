@@ -92,6 +92,17 @@ MAX_PER_AUTHOR = 1
 # (e.g. liking "Dune" won't get you "Dune Messiah"). Off by default.
 EXCLUDE_INPUT_AUTHORS = False
 
+# How several liked books are combined.
+#   "per_book" (default): each liked book gets its own taste profile, and the
+#       profiles take turns picking results, so EVERY book you enter is
+#       represented. If you enter more books than TOP_N, you get one result per
+#       book instead. Needed because averaging very different books (e.g.
+#       Pride and Prejudice + Neuromancer) let one book take every slot.
+#   "blend": average all your books into one profile (the original design).
+#       Good for finding books that combine similar inputs, but one input can
+#       crowd out the others.
+MULTI_BOOK_MODE = "per_book"
+
 # Weight given to each input book when building your taste profile.
 # Liked books count +1. The engine already supports negative weights (a
 # disliked book would be -1), but dislikes are not exposed in the command yet.

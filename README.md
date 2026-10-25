@@ -110,16 +110,25 @@ common ones, the one-per-author rule works, and lookup errors are clear.
    highest weight (as if it applied to one book). In this dataset that's 51
    tags at 0.5, mostly real topics the scoring model rates low across the
    board, like "cooking", "chess" and "haunted house".
-3. **Taste profile** — for each tag, the average across your books of
-   (input weight × that book's score). Liked books have input weight +1. The
-   engine already accepts −1 for disliked books; that just isn't exposed yet.
+3. **Taste profile** — for each tag, the average of (input weight × the
+   book's score). Liked books have input weight +1. The engine already accepts
+   −1 for disliked books; that just isn't exposed yet.
+   **With several liked books, each one gets its own profile** (setting
+   `MULTI_BOOK_MODE = "per_book"`). An average of very different books doesn't
+   work: averaging Pride and Prejudice with Neuromancer returned five
+   Austen-style books and nothing for Neuromancer, because almost no book is
+   half Regency romance and half cyberpunk.
 4. **Per-tag multipliers** — every tag is also multiplied by a number from the
    config (1.0 by default) so you can mute or boost tags.
 5. **Similarity** — cosine similarity between your weighted profile and each
    book's weighted tags (1 = identical direction, 0 = nothing in common).
 6. **Exclusions** — your input books are never recommended, and at most one
    book per author is returned (configurable).
-7. **Output** — the top 3, each with the 5 *shared* tags (the recommended book
+7. **Output** — the profiles take turns picking (the one with the strongest
+   remaining match goes first in each round), so **every book you entered is
+   represented**; each result says which of your books it's for. If you enter
+   more books than there are slots, you get one result per book. Each result
+   shows the 5 *shared* tags (the recommended book
    and at least one of your books both score ≥ threshold) that contributed most.
    Exact ties are broken by book id, so ordering never varies.
 
@@ -134,6 +143,7 @@ Every tunable number is in `config.py`, each with a comment. The main ones:
 | `EXPLAIN_TAGS` | 5 | Number of shared tags shown per recommendation. |
 | `MAX_PER_AUTHOR` | 1 | Max results per author. `None` = no limit. |
 | `EXCLUDE_INPUT_AUTHORS` | False | If True, never recommend books by authors of your input books (e.g. no Dune sequels). |
+| `MULTI_BOOK_MODE` | `"per_book"` | `"per_book"`: every liked book gets its own results. `"blend"`: average all your books into one profile (finds books that combine them, but one book can crowd out the others). |
 | `LIKE_WEIGHT` | 1.0 | Input weight for liked books. (`DISLIKE_WEIGHT` = −1 is reserved for later.) |
 | `TAG_MULTIPLIERS` | `{}` | Per-tag boost/mute, e.g. `{"romance": 0.0}`. Unlisted tags use `DEFAULT_TAG_MULTIPLIER` (1.0). Misspelled tag names are an error. |
 | `EXPECTED_BOOKS` / `EXPECTED_TAGS` | 9,374 / 727 | What the build insists on finding. |

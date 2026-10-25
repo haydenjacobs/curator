@@ -17,7 +17,7 @@ from curator.engine import EngineSettings, Recommender, RecommendationResult
 from curator.errors import CuratorError
 
 
-def format_result(result: RecommendationResult, decimals: int) -> str:
+def format_result(result: RecommendationResult, decimals: int, top_n: int) -> str:
     lines = ["Because you liked:"]
     for b in result.inputs:
         lines.append(f"  • {b['title']} — {b['author'] or 'unknown author'} ({b['year'] or '?'})  [id:{b['id']}]")
@@ -25,9 +25,13 @@ def format_result(result: RecommendationResult, decimals: int) -> str:
         lines.append("\nNo recommendations found (every candidate was excluded).")
         return "\n".join(lines)
     lines.append("")
+    if len(result.recommendations) > top_n:
+        lines.append(f"(Showing {len(result.recommendations)} instead of {top_n} so every book you entered is represented.)\n")
     for r in result.recommendations:
         b = r.book
         lines.append(f"{r.rank}. {b['title']} — {b['author'] or 'unknown author'} ({b['year'] or '?'})  [id:{b['id']}]")
+        if len(result.inputs) > 1:
+            lines.append(f"   because you liked: {'; '.join(b['title'] for b in r.because_of)}")
         lines.append(f"   similarity: {r.similarity:.{decimals}f}")
         if r.shared_tags:
             lines.append(f"   why: {', '.join(t.name for t in r.shared_tags)}")
@@ -51,7 +55,7 @@ def main(argv=None) -> int:
     except CuratorError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print(format_result(result, config.DISPLAY_DECIMALS))
+    print(format_result(result, config.DISPLAY_DECIMALS, settings.top_n))
     return 0
 
 

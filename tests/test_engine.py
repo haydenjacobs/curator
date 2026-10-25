@@ -188,3 +188,46 @@ def test_author_cap_applies_to_co_authors(tmp_path):
     res = Recommender(cat, EngineSettings(tag_threshold=THRESHOLD, top_n=6)).recommend(["Dune"])
     herbert = [r for r in res.recommendations if "Frank Herbert" in r.book["author"]]
     assert len(herbert) == 1
+
+
+# --- several liked books: every one must be represented ---------------------
+
+def _because(rec):
+    return [b["id"] for b in rec.because_of]
+
+
+def test_every_liked_book_is_represented(make_engine):
+    # Dune (desert/space) and Beach Days (surf/romance) are very different.
+    res = make_engine().recommend(["Dune", "Beach Days"])
+    sources = {i for r in res.recommendations for i in _because(r)}
+    assert sources == {1, 6}
+    assert len(res.recommendations) == 3
+
+
+def test_more_liked_books_than_slots_gives_one_each(make_engine):
+    res = make_engine(top_n=3).recommend(["Dune", "Beach Days", "Neuromancer", "1984"])
+    assert len(res.recommendations) == 4
+    assert sorted(i for r in res.recommendations for i in _because(r)) == [1, 4, 6, 9]
+
+
+def test_per_book_results_independent_of_input_order(make_engine):
+    e = make_engine(top_n=5)
+    a = e.recommend(["Dune", "Beach Days", "Neuromancer"])
+    b = e.recommend(["Neuromancer", "Dune", "Beach Days"])
+    assert a.recommendations == b.recommendations
+
+
+def test_no_book_recommended_twice(make_engine):
+    res = make_engine(top_n=9, max_per_author=None).recommend(["Dune", "Neuromancer"])
+    ids_ = [r.book["id"] for r in res.recommendations]
+    assert len(ids_) == len(set(ids_))
+
+
+def test_blend_mode_still_available(make_engine):
+    res = make_engine(multi_book_mode="blend").recommend(["Dune", "Beach Days"])
+    assert all(_because(r) == [1, 6] for r in res.recommendations)
+
+
+def test_unknown_mode_is_an_error(make_engine):
+    with pytest.raises(ConfigError, match="MULTI_BOOK_MODE"):
+        make_engine(multi_book_mode="average")
