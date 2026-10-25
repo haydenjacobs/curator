@@ -2,14 +2,17 @@
 Build step: raw dataset files -> validated processed files.
 
 Reads (never modifies) the raw files in data/raw/, checks them thoroughly,
-and writes:
-    data/processed/books.csv     one row per book (id, title, author, year, ...)
-    data/processed/tags.csv      one row per tag (id, name)
-    data/processed/scores.npy    books x tags score matrix (rows/cols in the
-                                 same order as books.csv / tags.csv)
-    data/processed/manifest.json counts, build date, source files, statistics
+and writes one folder per medium (data/processed/books, data/processed/movies):
+    items.csv      one row per book/movie (id, title, creator, year, ...)
+    tags.csv       one row per tag (id, name)
+    scores.npy     items x tags score matrix (rows/cols in the same order as
+                   items.csv / tags.csv)
+    manifest.json  counts, build date, source files, statistics
+plus data/processed/shared_tags.csv: the tags books and movies both have.
 
-Any problem with the data stops the build with a DataValidationError.
+Any problem with the data stops the build with a DataValidationError. Known
+defects in the published data are only accepted when declared exactly in
+config.py; anything else, or a declared defect that isn't there, stops the build.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ import datetime as _dt
 import json
 import shutil
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -27,14 +30,18 @@ import pandas as pd
 
 from .download import download, sha256_file
 from .errors import DataValidationError
-from .text import base_title, normalize
+from .text import ALIAS_SEP, book_aliases, movie_aliases, normalize, title_year
 
-BOOKS_FILE = "books.csv"
+MEDIA = ("book", "movie")
+MEDIUM_DIRS = {"book": "books", "movie": "movies"}   # folder names in data/processed
+ITEMS_FILE = "items.csv"
 TAGS_FILE = "tags.csv"
 MATRIX_FILE = "scores.npy"
 MANIFEST_FILE = "manifest.json"
-BOOK_COLUMNS = ["id", "title", "author", "year", "title_normalized", "title_base_normalized", "author_key"]
-AUTHOR_KEY_SEP = "|"  # separates multiple normalized authors in author_key
+SHARED_TAGS_FILE = "shared_tags.csv"
+SHARED_TAGS_COLUMNS = ["name", "book_tag_id", "movie_name", "movie_tag_id"]
+ITEM_COLUMNS = ["id", "title", "creator", "year", "title_normalized", "title_aliases", "creator_key"]
+CREATOR_KEY_SEP = "|"  # separates multiple normalized authors/directors in creator_key
 
 
 @dataclass(frozen=True)
@@ -44,11 +51,17 @@ class BuildSettings:
     scores_file: str
     metadata_file: str
     tags_file: str
-    expected_books: int
-    expected_tags: int
+    expected_books: int            # items with scores (books or movies)
+    expected_tags: int             # tags with scores
     expected_score_rows: int
     threshold_candidates: tuple
     tag_threshold: float
+    medium: str = "book"
+    creator_field: str = "authors"         # "directedBy" for movies
+    year_from_title: bool = False          # movies: year is the "(1995)" at the end of the title
+    expected_tag_records: int | None = None  # entries in tags.json, if more than expected_tags
+    known_without_metadata: tuple = ()     # scored item ids that have no metadata (left out)
+    known_incomplete: dict = field(default_factory=dict)  # item id -> tag names it has no score for (left out)
 
 
 # ---------------------------------------------------------------------------
@@ -167,14 +180,15 @@ def read_tags(path: Path, expected_tags: int) -> pd.DataFrame:
     return tags.sort_values("id", kind="stable").reset_index(drop=True)
 
 
-def _author_fields(value, where: str) -> tuple[str, str]:
-    """Return (display author, author_key). Missing author -> ("", "")."""
+def _creator_fields(value, where: str) -> tuple[str, str]:
+    """Return (display creator, creator_key) for a book's authors or a movie's
+    directors. Missing -> ("", "")."""
     if value is None:
         names = []
     elif isinstance(value, str):
-        # Co-authors are stored as one comma-separated string, e.g.
-        # "Neil Gaiman, Michael Reaves". (Checked on the real data: no name
-        # contains a comma, such as "King, Jr.".)
+        # Co-authors / co-directors are stored as one comma-separated string,
+        # e.g. "Neil Gaiman, Michael Reaves". (Checked on the real data: no
+        # name contains a comma, such as "King, Jr.".)
         names = [n for n in value.split(",") if n.strip()]
     elif isinstance(value, list):
         names = []
@@ -188,18 +202,18 @@ def _author_fields(value, where: str) -> tuple[str, str]:
     else:
         raise DataValidationError(f"{where}: unexpected authors value {value!r}")
     names = [" ".join(n.split()) for n in names]
-    display = value.strip() if isinstance(value, str) else ", ".join(names)
+    display = ", ".join(names)
     keys = []
     for n in names:
         k = normalize(n)
         if k and k not in keys:
             keys.append(k)
-    return display, AUTHOR_KEY_SEP.join(keys)
+    return display, CREATOR_KEY_SEP.join(keys)
 
 
 def _year_field(value, where: str) -> str:
     """Year as text ("" when missing). Non-year values are an error, not a guess.
-    The dataset uses 0 for an unknown year (1,256 books), so 0 counts as missing."""
+    The book dataset uses 0 for an unknown year (1,256 books), so 0 counts as missing."""
     if value is None or (isinstance(value, str) and not value.strip()):
         return ""
     year = _as_int(value, f"{where} year")
@@ -210,8 +224,10 @@ def _year_field(value, where: str) -> str:
     return str(year)
 
 
-def read_metadata(path: Path) -> pd.DataFrame:
+def read_metadata(path: Path, medium: str = "book", creator_field: str = "authors",
+                  year_from_title: bool = False) -> pd.DataFrame:
     records = _read_json_records(path)
+    aliases = movie_aliases if medium == "movie" else book_aliases
     rows = []
     for i, r in enumerate(records, start=1):
         where = f"{path.name} record {i}"
@@ -223,10 +239,13 @@ def read_metadata(path: Path) -> pd.DataFrame:
         if not isinstance(title, str) or not title.strip():
             raise DataValidationError(f"{where} (item_id {item_id}): missing title")
         title = " ".join(title.split())
-        author, author_key = _author_fields(r.get("authors"), f"{where} (item_id {item_id})")
-        year = _year_field(r.get("year"), f"{where} (item_id {item_id})")
-        rows.append((item_id, title, author, year, normalize(title), normalize(base_title(title)), author_key))
-    meta = pd.DataFrame(rows, columns=BOOK_COLUMNS)
+        creator, creator_key = _creator_fields(r.get(creator_field), f"{where} (item_id {item_id})")
+        if year_from_title:
+            year = title_year(title)
+        else:
+            year = _year_field(r.get("year"), f"{where} (item_id {item_id})")
+        rows.append((item_id, title, creator, year, normalize(title), ALIAS_SEP.join(aliases(title)), creator_key))
+    meta = pd.DataFrame(rows, columns=ITEM_COLUMNS)
     dups = meta[meta["id"].duplicated(keep=False)]
     if len(dups):
         raise DataValidationError(f"{path.name}: duplicate item_id values: {sorted(set(dups['id']))[:10]}")
@@ -288,7 +307,7 @@ def read_scores(path: Path, tags: pd.DataFrame, expected_rows: int) -> pd.DataFr
     dup_mask = df.duplicated(["item_id", "tag_id"], keep=False)
     if dup_mask.any():
         raise DataValidationError(
-            f"{path.name}: {int(dup_mask.sum()):,} rows are duplicate book-tag pairs, e.g.\n{df[dup_mask].head(6)}"
+            f"{path.name}: {int(dup_mask.sum()):,} rows are duplicate item-tag pairs, e.g.\n{df[dup_mask].head(6)}"
         )
     return df[["item_id", "tag_id", "score"]]
 
@@ -298,24 +317,24 @@ def read_scores(path: Path, tags: pd.DataFrame, expected_rows: int) -> pd.DataFr
 # ---------------------------------------------------------------------------
 
 def threshold_stats(matrix: np.ndarray, thresholds) -> dict:
-    n_books, n_tags = matrix.shape
+    n_items, n_tags = matrix.shape
     out = {}
     for t in thresholds:
         above = matrix >= t
-        per_book = above.sum(axis=1)
+        per_item = above.sum(axis=1)
         per_tag = above.sum(axis=0)
         out[f"{t:g}"] = {
             "pairs_at_or_above": int(above.sum()),
             "pct_of_all_pairs": round(100.0 * float(above.mean()), 2),
-            "tags_per_book_median": float(np.median(per_book)),
-            "tags_per_book_mean": round(float(per_book.mean()), 1),
-            "tags_per_book_p10": float(np.percentile(per_book, 10)),
-            "tags_per_book_p90": float(np.percentile(per_book, 90)),
-            "tags_per_book_min": int(per_book.min()),
-            "tags_per_book_max": int(per_book.max()),
-            "books_with_zero_tags": int((per_book == 0).sum()),
-            "tags_applying_to_no_book": int((per_tag == 0).sum()),
-            "tags_applying_to_over_half_of_books": int((per_tag > n_books / 2).sum()),
+            "tags_per_item_median": float(np.median(per_item)),
+            "tags_per_item_mean": round(float(per_item.mean()), 1),
+            "tags_per_item_p10": float(np.percentile(per_item, 10)),
+            "tags_per_item_p90": float(np.percentile(per_item, 90)),
+            "tags_per_item_min": int(per_item.min()),
+            "tags_per_item_max": int(per_item.max()),
+            "items_with_zero_tags": int((per_item == 0).sum()),
+            "tags_applying_to_no_item": int((per_tag == 0).sum()),
+            "tags_applying_to_over_half_of_items": int((per_tag > n_items / 2).sum()),
         }
     return out
 
@@ -324,75 +343,113 @@ def threshold_stats(matrix: np.ndarray, thresholds) -> dict:
 # Main build
 # ---------------------------------------------------------------------------
 
+DATASET_NAMES = {
+    "book": "Tag Genome Dataset for Books (Kotkov et al., 2022), GroupLens",
+    "movie": "MovieLens Tag Genome Dataset 2021 (Kotkov et al., 2021; Vig et al., 2012), GroupLens",
+}
+
+
 def build(s: BuildSettings, log=print) -> dict:
+    noun = s.medium
     scores_path = s.raw_dir / s.scores_file
     meta_path = s.raw_dir / s.metadata_file
     tags_path = s.raw_dir / s.tags_file
 
-    log(f"Reading tags from {tags_path} ...")
-    tags = read_tags(tags_path, s.expected_tags)
-    log(f"Reading book metadata from {meta_path} ...")
-    meta = read_metadata(meta_path)
-    log(f"Reading scores from {scores_path} (millions of rows, please wait) ...")
-    scores = read_scores(scores_path, tags, s.expected_score_rows)
+    log(f"Reading {noun} tags from {tags_path} ...")
+    all_tags = read_tags(tags_path, s.expected_tag_records or s.expected_tags)
+    log(f"Reading {noun} metadata from {meta_path} ...")
+    meta = read_metadata(meta_path, s.medium, s.creator_field, s.year_from_title)
+    log(f"Reading {noun} scores from {scores_path} (millions of rows, please wait) ...")
+    scores = read_scores(scores_path, all_tags, s.expected_score_rows)
+    n_score_rows = len(scores)
 
-    # --- books: exactly the scored books, every one must have metadata ---
+    # --- tags: exactly the scored ones ---
+    scored_tag_ids = set(scores["tag_id"].unique())
+    if len(scored_tag_ids) != s.expected_tags:
+        raise DataValidationError(f"{s.scores_file}: expected {s.expected_tags} tags, found {len(scored_tag_ids)}")
+    tags = all_tags[all_tags["id"].isin(scored_tag_ids)].reset_index(drop=True)
+    unscored_tags = sorted(set(all_tags["name"]) - set(tags["name"]))
+    if unscored_tags:
+        log(f"Note: {len(unscored_tags)} tags in {s.tags_file} have no scores and are left out: {unscored_tags}")
+
+    # --- items: exactly the scored ones, every one must have metadata ---
     scored_ids = np.sort(scores["item_id"].unique())
     if len(scored_ids) != s.expected_books:
-        raise DataValidationError(f"{s.scores_file}: expected {s.expected_books:,} books, found {len(scored_ids):,}")
-    tag_ids_in_scores = scores["tag_id"].nunique()
-    if tag_ids_in_scores != s.expected_tags:
-        raise DataValidationError(f"{s.scores_file}: expected {s.expected_tags} tags, found {tag_ids_in_scores}")
+        raise DataValidationError(f"{s.scores_file}: expected {s.expected_books:,} {noun}s, found {len(scored_ids):,}")
 
     meta_ids = set(meta["id"])
-    missing_meta = [int(i) for i in scored_ids if int(i) not in meta_ids]
-    if missing_meta:
+    missing_meta = sorted(int(i) for i in scored_ids if int(i) not in meta_ids)
+    if missing_meta != sorted(s.known_without_metadata):
         raise DataValidationError(
-            f"{len(missing_meta)} scored books have no entry in {s.metadata_file}, e.g. item_ids {missing_meta[:10]}"
+            f"{len(missing_meta)} scored {noun}s have no entry in {s.metadata_file}, e.g. item_ids {missing_meta[:10]}"
+            + (f" (config.py declares exactly these as known: {sorted(s.known_without_metadata)})"
+               if s.known_without_metadata else "")
         )
+    if missing_meta:
+        log(f"Note: {len(missing_meta)} scored {noun}s have no title or other metadata and are left out "
+            f"(declared in config.py): item_ids {missing_meta}")
     extra_meta = sorted(meta_ids - set(int(i) for i in scored_ids))
     if extra_meta:
-        log(f"Note: {len(extra_meta)} books in metadata have no scores and are left out of the catalog.")
+        log(f"Note: {len(extra_meta):,} {noun}s in metadata have no scores and are left out of the catalog.")
 
-    books = (
-        meta[meta["id"].isin(scored_ids)].sort_values("id", kind="stable").reset_index(drop=True)
-    )
+    items = meta[meta["id"].isin(scored_ids)].sort_values("id", kind="stable").reset_index(drop=True)
+    scores = scores[scores["item_id"].isin(items["id"])]
 
-    # --- matrix: every (book, tag) cell must be filled exactly once ---
-    row_of = pd.Series(np.arange(len(books)), index=books["id"].to_numpy())
+    # --- matrix: every (item, tag) cell must be filled exactly once ---
+    row_of = pd.Series(np.arange(len(items)), index=items["id"].to_numpy())
     col_of = pd.Series(np.arange(len(tags)), index=tags["id"].to_numpy())
-    matrix = np.full((len(books), len(tags)), np.nan, dtype=np.float64)
+    matrix = np.full((len(items), len(tags)), np.nan, dtype=np.float64)
     matrix[row_of[scores["item_id"]].to_numpy(), col_of[scores["tag_id"]].to_numpy()] = scores["score"].to_numpy()
-    if np.isnan(matrix).any():
-        missing = int(np.isnan(matrix).sum())
-        raise DataValidationError(f"Score matrix has {missing:,} missing book-tag pairs (every book must have every tag)")
+    gaps = {
+        int(items.at[r, "id"]): sorted(tags["name"].iloc[np.flatnonzero(np.isnan(matrix[r]))])
+        for r in np.flatnonzero(np.isnan(matrix).any(axis=1))
+    }
+    declared = {int(k): sorted(v) for k, v in s.known_incomplete.items()}
+    if gaps != declared:
+        raise DataValidationError(
+            f"Score matrix has {int(np.isnan(matrix).sum()):,} missing {noun}-tag pairs (every {noun} must have every "
+            f"tag). {noun.capitalize()}s with gaps: {dict(list(gaps.items())[:5])}"
+            + (f" (config.py declares exactly these as known: {declared})" if declared else "")
+        )
+    if gaps:
+        keep = ~items["id"].isin(list(gaps))
+        log(f"Note: {len(gaps)} {noun}(s) with missing scores are left out (declared in config.py): "
+            + "; ".join(f'{items.loc[items["id"] == i, "title"].iat[0]} (id {i}) has no score for {t}'
+                        for i, t in gaps.items()))
+        matrix = matrix[keep.to_numpy()]
+        items = items[keep].reset_index(drop=True)
 
     # --- reporting (no effect on the data) ---
-    dup_titles = books.groupby("title_base_normalized")["id"].count()
+    first_alias = items["title_aliases"].str.split(ALIAS_SEP).str[0]
+    dup_titles = items.groupby(first_alias)["id"].count()
     dup_titles = dup_titles[dup_titles > 1].sort_values(ascending=False, kind="stable")
-    author_counts = books[books["author_key"] != ""].groupby("author_key")["id"].count()
-    author_counts = author_counts.sort_values(ascending=False, kind="stable")
+    creator_counts = items[items["creator_key"] != ""].groupby("creator_key")["id"].count()
+    creator_counts = creator_counts.sort_values(ascending=False, kind="stable")
     stats = threshold_stats(matrix, s.threshold_candidates)
 
     manifest = {
+        "medium": s.medium,
         "build_date_utc": _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat(),
         "source": {
-            "dataset": "Tag Genome Dataset for Books (Kotkov et al., 2022), GroupLens",
+            "dataset": DATASET_NAMES[s.medium],
             "scores_file": s.scores_file,
             "scores_sha256": sha256_file(scores_path),
             "metadata_file": s.metadata_file,
             "tags_file": s.tags_file,
         },
         "counts": {
-            "books": int(len(books)),
+            "items": int(len(items)),
             "tags": int(len(tags)),
-            "score_rows": int(len(scores)),
+            "score_rows": int(n_score_rows),
             "metadata_records": int(len(meta)),
             "metadata_records_without_scores": len(extra_meta),
-            "books_missing_author": int((books["author"] == "").sum()),
-            "books_missing_year": int((books["year"] == "").sum()),
-            "titles_shared_by_multiple_books": int(len(dup_titles)),
-            "books_with_a_shared_title": int(dup_titles.sum()),
+            "tags_without_scores": len(unscored_tags),
+            "left_out_no_metadata": missing_meta,
+            "left_out_missing_scores": {str(k): v for k, v in gaps.items()},
+            "items_missing_creator": int((items["creator"] == "").sum()),
+            "items_missing_year": int((items["year"] == "").sum()),
+            "titles_shared_by_multiple_items": int(len(dup_titles)),
+            "items_with_a_shared_title": int(dup_titles.sum()),
         },
         "score_quantiles": {
             f"p{q}": round(float(np.percentile(matrix, q)), 4) for q in (1, 10, 25, 50, 75, 90, 95, 99)
@@ -401,19 +458,69 @@ def build(s: BuildSettings, log=print) -> dict:
         "tag_threshold_at_build": s.tag_threshold,
         "examples": {
             "most_common_shared_titles": {k: int(v) for k, v in dup_titles.head(10).items()},
-            "authors_with_most_books": {k: int(v) for k, v in author_counts.head(10).items()},
+            "creators_with_most_items": {k: int(v) for k, v in creator_counts.head(10).items()},
         },
-        "files": {"books": BOOKS_FILE, "tags": TAGS_FILE, "matrix": MATRIX_FILE},
+        "files": {"items": ITEMS_FILE, "tags": TAGS_FILE, "matrix": MATRIX_FILE},
     }
 
     # --- write (manifest last, so a half-finished build is never "valid") ---
     s.processed_dir.mkdir(parents=True, exist_ok=True)
     (s.processed_dir / MANIFEST_FILE).unlink(missing_ok=True)
-    books.to_csv(s.processed_dir / BOOKS_FILE, index=False, columns=BOOK_COLUMNS, quoting=csv.QUOTE_NONNUMERIC)
+    items.to_csv(s.processed_dir / ITEMS_FILE, index=False, columns=ITEM_COLUMNS, quoting=csv.QUOTE_NONNUMERIC)
     tags.to_csv(s.processed_dir / TAGS_FILE, index=False, quoting=csv.QUOTE_NONNUMERIC)
     np.save(s.processed_dir / MATRIX_FILE, matrix, allow_pickle=False)
     with open(s.processed_dir / MANIFEST_FILE, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
         f.write("\n")
-    log(f"Build complete: {len(books):,} books × {len(tags)} tags written to {s.processed_dir}")
+    log(f"Build complete: {len(items):,} {noun}s × {len(tags)} tags written to {s.processed_dir}")
     return manifest
+
+
+# ---------------------------------------------------------------------------
+# Shared tags (books <-> movies)
+# ---------------------------------------------------------------------------
+
+def build_shared_tags(processed_dir: Path, expected_exact: int, renames: dict, log=print) -> pd.DataFrame:
+    """Match book tags to movie tags and write shared_tags.csv.
+
+    Tags match only when their names are identical, plus the book->movie
+    spelling pairs declared in config.py (e.g. "anti war" -> "anti-war").
+    Exact matches must number exactly `expected_exact`, and every declared
+    pair must exist and not already be matched; anything else stops the build
+    and lists the near misses so they can be checked by a person."""
+    tags = {}
+    for m in MEDIA:
+        path = processed_dir / MEDIUM_DIRS[m] / TAGS_FILE
+        if not path.is_file():
+            raise DataValidationError(f"Missing {path}: build the {m} catalog first.")
+        tags[m] = pd.read_csv(path, dtype={"name": str}, keep_default_na=False)
+    book_id = dict(zip(tags["book"]["name"], tags["book"]["id"]))
+    movie_id = dict(zip(tags["movie"]["name"], tags["movie"]["id"]))
+
+    exact = [n for n in tags["book"]["name"] if n in movie_id]
+    if len(exact) != expected_exact:
+        by_norm: dict[str, list] = {}
+        for n in movie_id:
+            by_norm.setdefault(normalize(n), []).append(n)
+        near = {b: by_norm[normalize(b)] for b in book_id if b not in movie_id and normalize(b) in by_norm}
+        raise DataValidationError(
+            f"Books and movies share {len(exact)} identically named tags, config.py expects {expected_exact}. "
+            f"Book tags that differ from a movie tag only in punctuation/case: {near}"
+        )
+    for b, mv in renames.items():
+        if b not in book_id or mv not in movie_id:
+            raise DataValidationError(f"Declared shared tag {b!r} -> {mv!r}: not a book tag and a movie tag.")
+        if b in movie_id or mv in book_id:
+            raise DataValidationError(f"Declared shared tag {b!r} -> {mv!r}: one of them already matches exactly.")
+    if len(set(renames.values())) != len(renames):
+        raise DataValidationError("Declared shared tags map two book tags to the same movie tag.")
+
+    pairs = {n: n for n in exact} | dict(renames)
+    shared = pd.DataFrame(
+        [(b, int(book_id[b]), pairs[b], int(movie_id[pairs[b]])) for b in tags["book"]["name"] if b in pairs],
+        columns=SHARED_TAGS_COLUMNS,
+    )
+    shared.to_csv(processed_dir / SHARED_TAGS_FILE, index=False, quoting=csv.QUOTE_NONNUMERIC)
+    log(f"Shared tags: {len(exact)} identical names + {len(renames)} declared spelling pairs = {len(shared)} "
+        f"written to {processed_dir / SHARED_TAGS_FILE}")
+    return shared

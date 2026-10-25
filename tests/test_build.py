@@ -24,14 +24,15 @@ def run_build(tmp_path, **raw_overrides):
 
 def test_good_data_builds(tmp_path):
     manifest = run_build(tmp_path)
-    assert manifest["counts"]["books"] == len(BOOKS)
+    assert manifest["medium"] == "book"
+    assert manifest["counts"]["items"] == len(BOOKS)
     assert manifest["counts"]["tags"] == len(TAGS)
-    assert manifest["counts"]["books_missing_author"] == 1
-    assert manifest["counts"]["books_missing_year"] == 1
-    assert manifest["counts"]["titles_shared_by_multiple_books"] == 1  # "Twins"
+    assert manifest["counts"]["items_missing_creator"] == 1
+    assert manifest["counts"]["items_missing_year"] == 1
+    assert manifest["counts"]["titles_shared_by_multiple_items"] == 1  # "Twins"
     cat = load_catalog(tmp_path / "processed")
     assert cat.scores.shape == (len(BOOKS), len(TAGS))
-    # Row/column order matches books.csv/tags.csv
+    # Row/column order matches items.csv/tags.csv
     assert cat.scores[0, TAGS.index("desert")] == pytest.approx(0.95)
     assert list(cat.tags["name"]) == TAGS
     manifest_file = json.loads((tmp_path / "processed" / "manifest.json").read_text())
@@ -73,7 +74,7 @@ def test_missing_score_value(tmp_path):
 def test_duplicate_book_tag_pair(tmp_path):
     rows = good_rows()
     rows[1] = rows[0]  # same count, but one pair twice and one pair missing
-    with pytest.raises(DataValidationError, match="duplicate book-tag pairs"):
+    with pytest.raises(DataValidationError, match="duplicate item-tag pairs"):
         run_build(tmp_path, score_rows=rows)
 
 
@@ -180,3 +181,128 @@ def test_zip_extracts_only_needed_files(tmp_path):
                      zip_sha256=sha256_file(raw / "book-genome.zip"), **QUIET)
     assert (raw / "scores" / "glmer.csv").is_file()
     assert not (raw / "scores" / "tagdl.csv").exists()
+
+
+# --- movies -------------------------------------------------------------------
+
+from conftest import MOVIE_TAGS, MOVIES, SHARED_SPELLINGS, build_library, movie_settings_for, write_movie_raw  # noqa: E402
+from curator.build import build_shared_tags  # noqa: E402
+from curator.data import load_library, load_shared_tags  # noqa: E402
+from curator.text import movie_aliases  # noqa: E402
+
+
+def movie_rows(skip=()):
+    return [(MOVIE_TAGS[j], m[0], m[3][j]) for m in MOVIES for j in range(len(MOVIE_TAGS))
+            if (MOVIE_TAGS[j], m[0]) not in skip]
+
+
+def run_movie_build(tmp_path, settings=None, **raw_overrides):
+    write_movie_raw(tmp_path / "raw_movies", **raw_overrides)
+    return build(settings or movie_settings_for(tmp_path), **QUIET)
+
+
+def test_good_movie_data_builds(tmp_path):
+    manifest = run_movie_build(tmp_path)
+    assert manifest["medium"] == "movie"
+    assert manifest["counts"]["items"] == len(MOVIES)
+    assert manifest["counts"]["items_missing_creator"] == 1
+    assert manifest["counts"]["items_missing_year"] == 0
+    cat = load_catalog(tmp_path / "processed" / "movies", "movie")
+    heat = cat.item_info(2)
+    assert heat == {"id": 103, "title": "Heat (1995)", "creator": "Michael Mann", "year": "1995", "medium": "movie"}
+
+
+def test_movie_title_aliases():
+    assert movie_aliases("Heat (1995)") == ["heat"]
+    assert movie_aliases("Three Musketeers, The (1993)") == ["the three musketeers"]
+    assert movie_aliases("Postman, The (Postino, Il) (1994)") == ["the postman", "il postino"]
+    assert movie_aliases("Seven (a.k.a. Se7en) (1995)") == ["seven", "se7en"]
+    assert movie_aliases("Paris, Texas (1984)") == ["paris texas"]  # "Texas" is not an article
+
+
+def test_unscored_tags_in_tags_file_are_left_out(tmp_path):
+    records = [{"tag": t, "id": 500 + i} for i, t in enumerate(MOVIE_TAGS)] + [{"tag": "too short", "id": 999}]
+    s = movie_settings_for(tmp_path, expected_tag_records=len(MOVIE_TAGS) + 1)
+    manifest = run_movie_build(tmp_path, s, tag_records=records)
+    assert manifest["counts"]["tags_without_scores"] == 1
+    assert "too short" not in set(load_catalog(tmp_path / "processed" / "movies", "movie").tags["name"])
+
+
+def test_unscored_tag_needs_the_tag_record_count(tmp_path):
+    records = [{"tag": t, "id": 500 + i} for i, t in enumerate(MOVIE_TAGS)] + [{"tag": "too short", "id": 999}]
+    with pytest.raises(DataValidationError, match="expected 7 tags, found 8"):
+        run_movie_build(tmp_path, tag_records=records)
+
+
+def _meta_without(ids):
+    return [{"title": m[1], "directedBy": m[2], "item_id": m[0]} for m in MOVIES if m[0] not in ids]
+
+
+def test_declared_movie_without_metadata_is_left_out(tmp_path):
+    s = movie_settings_for(tmp_path, known_without_metadata=(104,))
+    manifest = run_movie_build(tmp_path, s, meta_records=_meta_without({104}))
+    assert manifest["counts"]["items"] == len(MOVIES) - 1
+    assert manifest["counts"]["left_out_no_metadata"] == [104]
+
+
+def test_undeclared_movie_without_metadata_stops_the_build(tmp_path):
+    with pytest.raises(DataValidationError, match="have no entry in raw/metadata.json"):
+        run_movie_build(tmp_path, meta_records=_meta_without({104}))
+
+
+def test_declared_defect_that_isnt_there_stops_the_build(tmp_path):
+    with pytest.raises(DataValidationError, match="declares exactly these as known"):
+        run_movie_build(tmp_path, movie_settings_for(tmp_path, known_without_metadata=(104,)))
+
+
+def test_declared_missing_score_leaves_movie_out(tmp_path):
+    s = movie_settings_for(tmp_path, expected_score_rows=len(MOVIES) * len(MOVIE_TAGS) - 1,
+                           known_incomplete={103: ("heist",)})
+    manifest = run_movie_build(tmp_path, s, score_rows=movie_rows(skip={("heist", 103)}))
+    assert manifest["counts"]["left_out_missing_scores"] == {"103": ["heist"]}
+    assert 103 not in set(load_catalog(tmp_path / "processed" / "movies", "movie").items["id"])
+
+
+def test_undeclared_missing_score_stops_the_build(tmp_path):
+    s = movie_settings_for(tmp_path, expected_score_rows=len(MOVIES) * len(MOVIE_TAGS) - 1)
+    with pytest.raises(DataValidationError, match="missing movie-tag pairs"):
+        run_movie_build(tmp_path, s, score_rows=movie_rows(skip={("heist", 103)}))
+
+
+# --- shared tags ----------------------------------------------------------------
+
+def test_shared_tags_exact_names_plus_declared_spellings(tmp_path):
+    lib = load_library(build_library(tmp_path))
+    shared = lib.shared_tags
+    assert list(shared["name"]) == ["space", "desert", "cyberpunk", "surf", "romance"]  # book tag order
+    assert dict(zip(shared["name"], shared["movie_name"]))["surf"] == "surfing"
+
+
+def test_shared_tag_count_mismatch_lists_near_misses(tmp_path):
+    build_library(tmp_path)
+    with pytest.raises(DataValidationError, match="share 4 identically named tags, config.py expects 5"):
+        build_shared_tags(tmp_path / "processed", 5, SHARED_SPELLINGS, **QUIET)
+
+
+def test_bad_declared_spelling_is_an_error(tmp_path):
+    build_library(tmp_path)
+    with pytest.raises(DataValidationError, match="not a book tag and a movie tag"):
+        build_shared_tags(tmp_path / "processed", 4, {"surf": "surf-board"}, **QUIET)
+    with pytest.raises(DataValidationError, match="already matches exactly"):
+        build_shared_tags(tmp_path / "processed", 4, {"surf": "space"}, **QUIET)
+
+
+def test_tampered_shared_tags_are_detected(tmp_path):
+    processed = build_library(tmp_path)
+    path = processed / "shared_tags.csv"
+    path.write_text(path.read_text().replace('"surfing"', '"heist"'))
+    books = load_catalog(processed / "books", "book")
+    movies = load_catalog(processed / "movies", "movie")
+    with pytest.raises(DataValidationError, match="don't match the movie tags.csv"):
+        load_shared_tags(path, books, movies)
+
+
+def test_catalog_of_the_wrong_medium_is_rejected(tmp_path):
+    processed = build_library(tmp_path)
+    with pytest.raises(DataValidationError, match="holds 'movie' data, expected 'book'"):
+        load_catalog(processed / "movies", "book")

@@ -1,50 +1,50 @@
-"""The algorithm: lookup, rarity weights, determinism, author cap, explanations."""
+"""Lookup, rarity weights, and the book-only cosine modes ("per_book", "blend")."""
 
 import numpy as np
 import pytest
 
 from conftest import TAGS, THRESHOLD
 from curator.engine import rarity_weights
-from curator.errors import AmbiguousBookError, BookNotFoundError, ConfigError, CuratorError
-from curator.lookup import find_book
+from curator.errors import AmbiguousItemError, ConfigError, CuratorError, ItemNotFoundError
+from curator.lookup import find_item
 
 
 def ids(result):
-    return [r.book["id"] for r in result.recommendations]
+    return [r.item["id"] for r in result.recommendations]
 
 
 # --- lookup -----------------------------------------------------------------
 
 def test_lookup_exact_title_case_insensitive(catalog):
-    assert catalog.book_info(find_book(catalog, "neuromancer"))["id"] == 4
-    assert catalog.book_info(find_book(catalog, "  NEUROMANCER ")) ["id"] == 4
+    assert catalog.item_info(find_item(catalog, "neuromancer"))["id"] == 4
+    assert catalog.item_info(find_item(catalog, "  NEUROMANCER ")) ["id"] == 4
 
 
 def test_lookup_title_without_series_note(catalog):
     # "Dune (Dune Chronicles, #1)" is found by just "Dune", not confused with Dune Messiah.
-    assert catalog.book_info(find_book(catalog, "Dune"))["id"] == 1
-    assert catalog.book_info(find_book(catalog, "dune (dune chronicles #1)"))["id"] == 1
+    assert catalog.item_info(find_item(catalog, "Dune"))["id"] == 1
+    assert catalog.item_info(find_item(catalog, "dune (dune chronicles #1)"))["id"] == 1
 
 
 def test_lookup_by_id_and_numeric_title(catalog):
-    assert catalog.book_info(find_book(catalog, "id:7"))["id"] == 7
-    assert catalog.book_info(find_book(catalog, "1984"))["id"] == 9  # a title, not an id
+    assert catalog.item_info(find_item(catalog, "id:7"))["id"] == 7
+    assert catalog.item_info(find_item(catalog, "1984"))["id"] == 9  # a title, not an id
 
 
 def test_lookup_no_match_is_clear(catalog):
-    with pytest.raises(BookNotFoundError, match='"Moby Dick" is not in the catalog'):
-        find_book(catalog, "Moby Dick")
+    with pytest.raises(ItemNotFoundError, match='"Moby Dick" is not in the book catalog'):
+        find_item(catalog, "Moby Dick")
 
 
 def test_lookup_no_exact_match_lists_suggestions_but_never_picks(catalog):
-    with pytest.raises(BookNotFoundError) as exc:
-        find_book(catalog, "Messiah")
+    with pytest.raises(ItemNotFoundError) as exc:
+        find_item(catalog, "Messiah")
     assert "id:2" in str(exc.value) and "Dune Messiah" in str(exc.value)
 
 
 def test_lookup_multiple_matches_lists_author_and_year(catalog):
-    with pytest.raises(AmbiguousBookError) as exc:
-        find_book(catalog, "twins")
+    with pytest.raises(AmbiguousItemError) as exc:
+        find_item(catalog, "twins")
     msg = str(exc.value)
     assert "matches 2 books" in msg
     assert "id:7  Twins — Author One (1990)" in msg
@@ -53,8 +53,8 @@ def test_lookup_multiple_matches_lists_author_and_year(catalog):
 
 
 def test_lookup_unknown_id(catalog):
-    with pytest.raises(BookNotFoundError, match="No book with id 999"):
-        find_book(catalog, "id:999")
+    with pytest.raises(ItemNotFoundError, match="No book with id 999"):
+        find_item(catalog, "id:999")
 
 
 # --- rarity -----------------------------------------------------------------
@@ -78,14 +78,14 @@ def test_tag_on_no_book_gets_max_weight_not_infinity():
 
 # --- determinism ------------------------------------------------------------
 
-def test_same_input_gives_identical_output(make_engine):
-    a = make_engine().recommend(["Dune", "Neuromancer"])
-    b = make_engine().recommend(["Dune", "Neuromancer"])
+def test_same_input_gives_identical_output(cosine_engine):
+    a = cosine_engine().recommend(["Dune", "Neuromancer"])
+    b = cosine_engine().recommend(["Dune", "Neuromancer"])
     assert a == b
 
 
-def test_input_order_does_not_change_results(make_engine):
-    e = make_engine()
+def test_input_order_does_not_change_results(cosine_engine):
+    e = cosine_engine()
     a = e.recommend(["Dune", "Neuromancer"])
     b = e.recommend(["Neuromancer", "Dune"])
     assert a.recommendations == b.recommendations
@@ -93,88 +93,88 @@ def test_input_order_does_not_change_results(make_engine):
 
 # --- exclusions / author cap -----------------------------------------------
 
-def test_input_books_never_recommended(make_engine):
-    res = make_engine(top_n=9).recommend(["Dune", "Neuromancer"])
+def test_input_books_never_recommended(cosine_engine):
+    res = cosine_engine(top_n=9).recommend(["Dune", "Neuromancer"])
     assert 1 not in ids(res) and 4 not in ids(res)
 
 
-def test_author_cap_default_one_per_author(make_engine):
+def test_author_cap_default_one_per_author(cosine_engine):
     # Liking Dune: Dune Messiah and Children of Dune are both very similar,
     # but only one Frank Herbert book may appear.
-    res = make_engine(top_n=5).recommend(["Dune"])
-    herbert = [r for r in res.recommendations if r.book["author"] == "Frank Herbert"]
+    res = cosine_engine(top_n=5).recommend(["Dune"])
+    herbert = [r for r in res.recommendations if r.item["creator"] == "Frank Herbert"]
     assert len(herbert) == 1
     assert len(res.recommendations) == 5
 
 
-def test_author_cap_can_be_raised_or_removed(make_engine):
-    res2 = make_engine(top_n=5, max_per_author=2).recommend(["Dune"])
-    assert sum(r.book["author"] == "Frank Herbert" for r in res2.recommendations) == 2
-    res_none = make_engine(top_n=5, max_per_author=None).recommend(["Dune"])
+def test_author_cap_can_be_raised_or_removed(cosine_engine):
+    res2 = cosine_engine(top_n=5, max_per_author=2).recommend(["Dune"])
+    assert sum(r.item["creator"] == "Frank Herbert" for r in res2.recommendations) == 2
+    res_none = cosine_engine(top_n=5, max_per_author=None).recommend(["Dune"])
     assert ids(res_none)[:2] == [2, 3]
 
 
-def test_exclude_input_authors_option(make_engine):
-    res = make_engine(top_n=5, exclude_input_authors=True).recommend(["Dune"])
-    assert all(r.book["author"] != "Frank Herbert" for r in res.recommendations)
+def test_exclude_input_authors_option(cosine_engine):
+    res = cosine_engine(top_n=5, exclude_input_authors=True).recommend(["Dune"])
+    assert all(r.item["creator"] != "Frank Herbert" for r in res.recommendations)
 
 
-def test_books_without_author_are_not_capped_together(make_engine):
-    res = make_engine(top_n=9).recommend(["Dune"])
+def test_books_without_author_are_not_capped_together(cosine_engine):
+    res = cosine_engine(top_n=9).recommend(["Dune"])
     assert 10 in ids(res)  # the authorless book is still eligible
 
 
 # --- profile, multipliers, explanations ------------------------------------
 
-def test_explanations_are_shared_tags_and_sum_within_similarity(make_engine):
-    res = make_engine().recommend(["Dune"])
+def test_explanations_are_shared_tags_and_sum_within_similarity(cosine_engine):
+    res = cosine_engine().recommend(["Dune"])
     top = res.recommendations[0]
     names = [t.name for t in top.shared_tags]
     assert "desert" in names and "fiction" not in names  # fiction has 0 rarity weight
-    assert sum(t.contribution for t in top.shared_tags) <= top.similarity + 1e-12
+    assert sum(t.contribution for t in top.shared_tags) <= top.score + 1e-12
     for t in top.shared_tags:
         assert t.candidate_score >= THRESHOLD
 
 
-def test_muting_a_tag_removes_its_influence(make_engine):
-    normal = make_engine().recommend(["Beach Days"])
-    muted = make_engine(tag_multipliers={"surf": 0.0}).recommend(["Beach Days"])
+def test_muting_a_tag_removes_its_influence(cosine_engine):
+    normal = cosine_engine().recommend(["Beach Days"])
+    muted = cosine_engine(tag_multipliers={"surf": 0.0}).recommend(["Beach Days"])
     for r in muted.recommendations:
         assert "surf" not in [t.name for t in r.shared_tags]
     assert normal != muted
 
 
-def test_unknown_multiplier_tag_is_an_error(catalog, make_engine):
+def test_unknown_multiplier_tag_is_an_error(catalog, cosine_engine):
     with pytest.raises(ConfigError, match="don't exist"):
-        make_engine(tag_multipliers={"romanse": 0.0})
+        cosine_engine(tag_multipliers={"romanse": 0.0})
 
 
-def test_dislike_hook_works_without_structural_change(catalog, make_engine):
-    e = make_engine(top_n=9)
-    dune, beach = find_book(catalog, "Dune"), find_book(catalog, "Beach Days")
-    liked_only = e.recommend_rows([(dune, 1.0)])
-    with_dislike = e.recommend_rows([(dune, 1.0), (beach, -1.0)])
-    assert beach not in [find_book(catalog, f"id:{i}") for i in ids(with_dislike)]
+def test_dislike_hook_works_without_structural_change(catalog, cosine_engine):
+    e = cosine_engine(top_n=9)
+    dune, beach = find_item(catalog, "Dune"), find_item(catalog, "Beach Days")
+    liked_only = e.recommend_rows([("book", dune, 1.0)])
+    with_dislike = e.recommend_rows([("book", dune, 1.0), ("book", beach, -1.0)])
+    assert beach not in [find_item(catalog, f"id:{i}") for i in ids(with_dislike)]
     assert liked_only != with_dislike
 
 
-def test_same_book_twice_is_an_error(make_engine):
+def test_same_book_twice_is_an_error(cosine_engine):
     with pytest.raises(CuratorError, match="more than once"):
-        make_engine().recommend(["Dune", "id:1"])
+        cosine_engine().recommend(["Dune", "id:1"])
 
 
-def test_similarity_is_cosine(catalog, make_engine):
-    e = make_engine(top_n=1, max_per_author=None)
+def test_similarity_is_cosine(catalog, cosine_engine):
+    e = cosine_engine(top_n=1, max_per_author=None)
     res = e.recommend(["Dune"])
     w = rarity_weights(catalog.scores, THRESHOLD)
     a, b = catalog.scores[0] * w, catalog.scores[1] * w
-    assert res.recommendations[0].similarity == pytest.approx(a @ b / np.linalg.norm(a) / np.linalg.norm(b))
+    assert res.recommendations[0].score == pytest.approx(a @ b / np.linalg.norm(a) / np.linalg.norm(b))
 
 
 def test_author_cap_applies_to_co_authors(tmp_path):
     from conftest import BOOKS, settings_for, write_raw
     from curator.build import build
-    from curator.data import load_catalog
+    from curator.data import Library, load_catalog
     from curator.engine import EngineSettings, Recommender
 
     # A Dune-like book co-written by Frank Herbert, stored the way the real
@@ -184,9 +184,10 @@ def test_author_cap_applies_to_co_authors(tmp_path):
     s = settings_for(tmp_path, n_books=len(BOOKS) + 1)
     build(s, log=lambda *_: None)
     cat = load_catalog(s.processed_dir)
-    assert cat.author_keys(10) == {"brian herbert", "frank herbert"}
-    res = Recommender(cat, EngineSettings(tag_threshold=THRESHOLD, top_n=6)).recommend(["Dune"])
-    herbert = [r for r in res.recommendations if "Frank Herbert" in r.book["author"]]
+    assert cat.creator_keys(10) == {"brian herbert", "frank herbert"}
+    settings = EngineSettings(tag_threshold=THRESHOLD, top_n=6, multi_book_mode="per_book")
+    res = Recommender(Library({"book": cat}, None), settings).recommend(["Dune"])
+    herbert = [r for r in res.recommendations if "Frank Herbert" in r.item["creator"]]
     assert len(herbert) == 1
 
 
@@ -196,38 +197,38 @@ def _because(rec):
     return [b["id"] for b in rec.because_of]
 
 
-def test_every_liked_book_is_represented(make_engine):
+def test_every_liked_book_is_represented(cosine_engine):
     # Dune (desert/space) and Beach Days (surf/romance) are very different.
-    res = make_engine().recommend(["Dune", "Beach Days"])
+    res = cosine_engine().recommend(["Dune", "Beach Days"])
     sources = {i for r in res.recommendations for i in _because(r)}
     assert sources == {1, 6}
     assert len(res.recommendations) == 3
 
 
-def test_more_liked_books_than_slots_gives_one_each(make_engine):
-    res = make_engine(top_n=3).recommend(["Dune", "Beach Days", "Neuromancer", "1984"])
+def test_more_liked_books_than_slots_gives_one_each(cosine_engine):
+    res = cosine_engine(top_n=3).recommend(["Dune", "Beach Days", "Neuromancer", "1984"])
     assert len(res.recommendations) == 4
     assert sorted(i for r in res.recommendations for i in _because(r)) == [1, 4, 6, 9]
 
 
-def test_per_book_results_independent_of_input_order(make_engine):
-    e = make_engine(top_n=5)
+def test_per_book_results_independent_of_input_order(cosine_engine):
+    e = cosine_engine(top_n=5)
     a = e.recommend(["Dune", "Beach Days", "Neuromancer"])
     b = e.recommend(["Neuromancer", "Dune", "Beach Days"])
     assert a.recommendations == b.recommendations
 
 
-def test_no_book_recommended_twice(make_engine):
-    res = make_engine(top_n=9, max_per_author=None).recommend(["Dune", "Neuromancer"])
-    ids_ = [r.book["id"] for r in res.recommendations]
+def test_no_book_recommended_twice(cosine_engine):
+    res = cosine_engine(top_n=9, max_per_author=None).recommend(["Dune", "Neuromancer"])
+    ids_ = [r.item["id"] for r in res.recommendations]
     assert len(ids_) == len(set(ids_))
 
 
-def test_blend_mode_still_available(make_engine):
-    res = make_engine(multi_book_mode="blend").recommend(["Dune", "Beach Days"])
+def test_blend_mode_still_available(cosine_engine):
+    res = cosine_engine(multi_book_mode="blend").recommend(["Dune", "Beach Days"])
     assert all(_because(r) == [1, 6] for r in res.recommendations)
 
 
-def test_unknown_mode_is_an_error(make_engine):
+def test_unknown_mode_is_an_error(cosine_engine):
     with pytest.raises(ConfigError, match="MULTI_BOOK_MODE"):
-        make_engine(multi_book_mode="average")
+        cosine_engine(multi_book_mode="average")
